@@ -106,9 +106,11 @@ skillshare sync extras
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `urls` | array of `{name, url}` | — | Remote rules to download |
+| `urls` | array of `{name, url, enable?}` | — | Remote rules to download |
 | `outputs` | string array | `["AGENTS.md", "CLAUDE.md"]` | Output file paths |
 | `name` | string | filename stem | Overrides the `<rule name>` for local body content |
+| `enable` (top-level) | `true` / `false` | `true` | Toggles all rules in this stub; `false` skips download and deletes matching `<rule>` blocks |
+| `enable` (per-url) | `true` / `false` | inherits top-level | Overrides top-level `enable` for one URL |
 | `description` | string | — | Ignored by ruler (accepted for compatibility) |
 
 ### Output paths
@@ -137,6 +139,36 @@ content (hand-written headers, comments, other XML) is never touched.
 
 If remote and local rules share the same `name`, the local rule wins
 (closer source, higher priority).
+
+### Enable / disable
+
+Set `enable: false` to temporarily withdraw a rule without deleting its
+config. Disabled rules are **not** downloaded; ruler removes any
+existing `<rule name="…">` block with the same name from each output
+file and normalizes the surrounding blank lines so exactly one blank
+line stays between blocks. Flip it back to `true` (or omit it) to
+restore the rule on the next sync.
+
+A per-url `enable` overrides the stub's top-level `enable`:
+
+```yaml
+---
+enable: false          # withdraw everything by default
+urls:
+  - name: keep
+    url: https://example.com/keep.md
+    enable: true       # ...except this one stays
+---
+```
+
+The local body has no per-entry knob — it follows the top-level
+`enable` only.
+
+Within a single sync, ruler deletes every disabled rule first (then
+normalizes blank lines), and upserts every enabled rule afterward, so a
+stub that both disables one rule and enables another leaves the output
+file with exactly one blank line between remaining blocks. Disabled rules
+never touch the network: the download is skipped and only the deletion runs.
 
 ## Test locally
 
@@ -185,17 +217,19 @@ printf '%s\n' \
 node extensions/ruler/test-ruler.js
 ```
 
-Covers YAML parsing, XML block construction, upsert logic, project-root
-detection, and local/combined rule extraction — no network access needed.
+Covers YAML parsing, XML block construction, upsert + delete logic, the
+`enable` cascade, delete blank-line normalization, the disable to re-enable
+round-trip invariant, project-root detection, and local/combined rule
+extraction. No network access needed.
 
 ## Files
 
 ```
 extensions/ruler/
 ├── extension.yaml       # Tells skillshare how to run this extension
-├── convert.js           # Core transform logic (438 lines, zero deps)
+├── convert.js           # Core transform logic (zero deps; exports pure helpers)
 ├── convert.d.ts         # TypeScript declarations for IDE support
-├── test-ruler.js        # Offline smoke test suite
+├── test-ruler.js        # Offline smoke test (exercises the real convert.js exports)
 ├── .gitignore           # Ignores dummy/ so placeholder files stay out of VC
 └── README.md            # This file
 ```

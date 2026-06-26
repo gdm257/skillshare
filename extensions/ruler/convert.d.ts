@@ -2,13 +2,11 @@
  * ruler — Remote + local rules extension for skillshare.
  *
  * Type declarations for convert.js.
- * This file is a standalone script (not an importable module); the
- * declarations below document the top-level types and functions for
- * maintenance and IDE support.
  *
- * @remarks All functions are in the script's module scope and are not
- *          exported. The type definitions mirror the JSDoc annotations in
- *          convert.js — they are the authoritative source.
+ * convert.js guards its entry point behind `require.main === module` and
+ * exports the pure helpers below, so test-ruler.js exercises the real
+ * implementation. These declarations document those exports for IDE support;
+ * they mirror the JSDoc annotations in convert.js (the authoritative source).
  */
 
 // ═══════════════════════════════════════════════════════════════
@@ -21,6 +19,8 @@ interface RuleUrl {
   name?: string;
   /** Remote Markdown source URL. */
   url?: string;
+  /** Per-url `enable` override (parsed string; "false" disables). */
+  enable?: string;
 }
 
 /** Parsed frontmatter block (loose YAML-subset object). */
@@ -29,6 +29,8 @@ interface ParsedFrontmatter {
   description?: string;
   urls?: RuleUrl[];
   outputs?: string[];
+  /** Top-level `enable` toggle (parsed string; "false" disables all rules). */
+  enable?: string;
   [key: string]: unknown;
 }
 
@@ -40,11 +42,20 @@ interface RuleEntry {
   content: string;
 }
 
-/** Internal tracker for a remote download task. */
-interface RemoteTask {
-  idx: number;
+/** A remote rule to download. */
+interface RemoteRule {
   name: string;
   url: string;
+}
+
+/** Result of splitting a stub's rules by `enable` state. */
+interface ClassifiedRules {
+  /** Enabled remote rules to download and upsert. */
+  remoteEnabled: RemoteRule[];
+  /** Whether the local body is enabled (upsert). */
+  localEnabled: boolean;
+  /** Names of disabled rules to delete from output files. */
+  disabledNames: string[];
 }
 
 /** Result wrapper for a single async task in `runLimited`. */
@@ -129,29 +140,67 @@ declare function escapeXmlAttr(s: string): string;
  */
 declare function makeRuleBlock(name: string, content: string): string;
 
-/**
- * Escape regex special characters in a string.
- */
+/** Escape regex special characters in a string. */
 declare function escapeRegex(s: string): string;
 
 /**
  * Upsert a `<rule name="X">` block into existing file content.
  *
  * - If a matching block exists → the entire block is replaced.
- * - Otherwise → the block is appended at the end.
+ * - Otherwise → the block is appended at the end (exactly one blank line
+ *   of separation; a fresh empty file gets no leading blank line).
  *
  * Non-rule content is preserved.
- *
- * @param existing   Current file content (may be empty).
- * @param ruleName   Value of the `name` attribute to match.
- * @param newBlock   Full `<rule>…</rule>` string to insert.
- * @returns The updated file content.
  */
 declare function upsertRule(existing: string, ruleName: string, newBlock: string): string;
+
+/**
+ * Remove a `<rule name="X">…</rule>` block by name and normalize blank
+ * lines so exactly one blank line stays between remaining blocks, the
+ * first block has no leading blank line, and the file ends with a single
+ * newline. Returns `""` when nothing remains.
+ */
+declare function deleteRule(existing: string, ruleName: string): string;
+
+// ═══════════════════════════════════════════════════════════════
+// Enable classification
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Decide whether a rule is enabled given the top-level and per-entry
+ * `enable` values. A per-entry value overrides the top-level; only the
+ * string `"false"` disables.
+ */
+declare function isEnabled(topEnable: string | undefined, entryEnable: string | undefined): boolean;
+
+/**
+ * Derive the `<rule name>` for the stub's local body: frontmatter `name`
+ * → filename stem of `SS_REL_PATH` → `"local-rule"`.
+ */
+declare function deriveLocalName(fm: ParsedFrontmatter, relPath: string): string;
+
+/**
+ * Split a stub's rules into enabled (download/upsert) and disabled (delete)
+ * based on the `enable` cascade. Disabled remote rules are NOT downloaded
+ * (zero network); their names are returned for deletion. The local body
+ * follows the top-level `enable` only.
+ */
+declare function classifyRules(
+  topEnable: string | undefined,
+  urls: RuleUrl[] | undefined,
+  localName: string,
+  body: string,
+): ClassifiedRules;
 
 // ═══════════════════════════════════════════════════════════════
 // 项目根目录推算
 // ═══════════════════════════════════════════════════════════════
+
+/**
+ * Resolve the user's home directory cross-platform
+ * (HOME → USERPROFILE → HOMEDRIVE+HOMEPATH).
+ */
+declare function homeDir(): string;
 
 /**
  * Infer the project root directory from `SS_TARGET_DIR`.
@@ -171,9 +220,6 @@ declare function findProjectRoot(targetDir: string): string;
  * - `~` prefix → expanded to `$HOME`.
  * - Absolute path → returned as-is.
  * - Relative path → joined against `projectRoot`.
- *
- * @param outputs     Raw output path list from frontmatter.
- * @param projectRoot  Fallback base for relative paths.
  */
 declare function resolveOutputs(outputs: string[], projectRoot: string): string[];
 
@@ -186,8 +232,11 @@ declare function resolveOutputs(outputs: string[], projectRoot: string): string[
  *
  * 1. Reads stdin.
  * 2. Parses frontmatter.
- * 3. Downloads remote `urls` (concurrently), collects local body.
- * 4. Resolves output paths and upserts `<rule>` blocks.
- * 5. Writes no meaningful stdout (skillshare writes empty placeholders).
+ * 3. Classifies rules by `enable` (disabled rules are not downloaded).
+ * 4. Downloads enabled remote `urls` (concurrently), collects local body.
+ * 5. Resolves output paths.
+ * 6. Per output file: deletes disabled `<rule>` blocks (normalized), then
+ *    upserts enabled `<rule>` blocks.
+ * 7. Writes no meaningful stdout (skillshare writes empty placeholders).
  */
 declare function main(): Promise<void>;
