@@ -489,7 +489,13 @@ async function main() {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (c) => (data += c));
-    process.stdin.on("end", () => resolve(data));
+    // Normalize CRLF -> LF on read. The whole extension assumes LF: the
+    // <rule> block format, the upsert/delete invariants, and deleteRule's
+    // blank-line regex are all expressed in \n. Windows-authored stubs
+    // arrive as CRLF; normalizing here keeps frontmatter parsing, the local
+    // body, and the downstream output consistent. Existing output files
+    // are normalized on read too (see step 6).
+    process.stdin.on("end", () => resolve(data.replace(/\r\n/g, "\n")));
   });
 
   // -- 2. Parse frontmatter --
@@ -556,7 +562,12 @@ async function main() {
     let existed = true;
     let existing = "";
     try {
-      existing = require("fs").readFileSync(outPath, "utf8");
+      // Normalize on read: existing AGENTS.md/CLAUDE.md may use CRLF
+      // (Windows-authored or editor-converted). The merge invariants
+      // assume LF and deleteRule's blank-line regex only matches \n, so
+      // CRLF would both leak mixed endings into the output and silently
+      // break blank-line normalization on delete.
+      existing = require("fs").readFileSync(outPath, "utf8").replace(/\r\n/g, "\n");
     } catch {
       // File does not exist yet — start fresh.
       existed = false;

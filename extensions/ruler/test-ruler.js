@@ -311,6 +311,53 @@ assert(
 assert(rtm.indexOf("\n\n\n") === -1, "round-trip multi: invariant holds");
 
 // ════════════════════════════════════════════════════════════════════════════
+// CRLF normalization (LF invariant on read)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// main() normalizes CRLF -> LF on read (stdin AND existing output files),
+// so the pure helpers always see LF. These cases mirror that contract:
+// normalize first, then exercise upsert/delete and assert the LF invariant
+// (no CR, exactly one blank line between blocks, single trailing newline).
+
+console.log("\n=== CRLF normalization (LF invariant on read) ===");
+
+// CRLF existing file, normalized then upserted -> no mixed endings
+const crlfSeed = "# AGENTS\r\n\r\n<rule name=\"old\">\r\nold body\r\n</rule>\r\n";
+const lfSeed = crlfSeed.replace(/\r\n/g, "\n");
+const upsertOnNormalized = C.upsertRule(lfSeed, "fresh", C.makeRuleBlock("fresh", "new rule"));
+assert(upsertOnNormalized.indexOf("\r") === -1, "CRLF->LF upsert: no CR in result");
+assert(upsertOnNormalized.indexOf("new rule") !== -1, "CRLF->LF upsert: new block present");
+assert(upsertOnNormalized.indexOf("\n\n\n") === -1, "CRLF->LF upsert: no doubled blank lines");
+assert(upsertOnNormalized.indexOf("old body") !== -1, "CRLF->LF upsert: old block preserved");
+
+// CRLF three-block file, delete middle after normalization -> regex works
+const crlfThree =
+  "<rule name=\"a\">\nA\n</rule>\n\n" +
+  "<rule name=\"b\">\nB\n</rule>\n\n" +
+  "<rule name=\"c\">\nC\n</rule>\n";
+const delMid = C.deleteRule(crlfThree, "b");
+assert(delMid.indexOf("\r") === -1, "CRLF->LF delete middle: no CR");
+assert(
+  delMid === "<rule name=\"a\">\nA\n</rule>\n\n<rule name=\"c\">\nC\n</rule>\n",
+  "CRLF->LF delete middle: survivors separated by exactly 1 blank line"
+);
+
+// CRLF header + rule, delete rule after normalization -> header kept, LF only
+const crlfHeaderRule = "# Header\r\n\r\n<rule name=\"x\">\r\nX\r\n</rule>\r\n".replace(/\r\n/g, "\n");
+const headerAfterDel = C.deleteRule(crlfHeaderRule, "x");
+assert(headerAfterDel === "# Header\n", "CRLF->LF delete with header: header kept, rule gone");
+assert(headerAfterDel.indexOf("\r") === -1, "CRLF->LF delete with header: no CR remains");
+
+// Full round-trip: CRLF seed -> normalize -> upsert -> stays LF on re-read
+const rtCrlf = "<rule name=\"rt\">\r\nv1\r\n</rule>\r\n".replace(/\r\n/g, "\n");
+let rtLf = C.upsertRule("", "rt", C.makeRuleBlock("rt", "v1"));
+rtLf = C.deleteRule(rtLf, "rt");
+assert(rtLf === "", "CRLF->LF round-trip: disable empties file");
+rtLf = C.upsertRule(rtLf, "rt", C.makeRuleBlock("rt", "v2"));
+assert(rtLf === "<rule name=\"rt\">\nv2\n</rule>\n", "CRLF->LF round-trip: restore is clean LF");
+assert(rtLf.indexOf("\r") === -1, "CRLF->LF round-trip: final output is pure LF");
+
+// ════════════════════════════════════════════════════════════════════════════
 // Project root detection & path resolution
 // ════════════════════════════════════════════════════════════════════════════
 
