@@ -20,6 +20,7 @@ type BuiltinExtension struct {
 var BuiltinExtensions = []BuiltinExtension{
 	{Name: "codex-agents", Description: "Convert Markdown subagents (Claude format) into Codex CLI TOML agents"},
 	{Name: "gemini-commands", Description: "Convert Markdown slash-commands (Claude/Cursor format) into Gemini CLI TOML commands"},
+	{Name: "ruler", Description: "Download remote rules from URLs and inject into AGENTS.md / CLAUDE.md via <rule> XML markers"},
 }
 
 // IsBuiltinExtension reports whether name is a known bundled extension. It
