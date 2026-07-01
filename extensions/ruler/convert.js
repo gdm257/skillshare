@@ -336,6 +336,130 @@ function deleteRule(existing, ruleName) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Sync manifest (state tracking for orphan-rule cleanup)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Manifest filename, written in the extension dir (process.cwd()).
+ * @type {string}
+ */
+const MANIFEST_FILE = ".ruler-manifest.json";
+
+/**
+ * Read the sync manifest from a directory.
+ * Returns {} on missing file or corrupt JSON (treat as fresh start).
+ *
+ * @param {string} extDir  — extension directory (usually process.cwd())
+ * @returns {Record<string, any>}
+ */
+function readManifest(extDir) {
+  try {
+    const data = require("fs").readFileSync(
+      require("path").join(extDir, MANIFEST_FILE),
+      "utf8"
+    );
+    const parsed = JSON.parse(data);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Write the sync manifest to a directory with a timestamp.
+ *
+ * @param {string} extDir
+ * @param {Record<string, any>} manifest
+ */
+function writeManifest(extDir, manifest) {
+  manifest["_updated_at"] = new Date().toISOString();
+  require("fs").writeFileSync(
+    require("path").join(extDir, MANIFEST_FILE),
+    JSON.stringify(manifest, null, 2) + "\n",
+    "utf8"
+  );
+}
+
+/**
+ * Derive the source root directory from SS_SRC_PATH and SS_REL_PATH.
+ *
+ * SS_SRC_PATH = /home/user/extras/rules/sub/file.md
+ * SS_REL_PATH = sub/file.md
+ * -> sourceRoot = /home/user/extras/rules
+ *
+ * Falls back to path.dirname(srcPath) if the suffix doesn't match.
+ * Returns "" if srcPath is empty.
+ *
+ * @param {string} srcPath  — value of SS_SRC_PATH
+ * @param {string} relPath  — value of SS_REL_PATH
+ * @returns {string}
+ */
+function findSourceRoot(srcPath, relPath) {
+  if (!srcPath) return "";
+  const normSrc = srcPath.replace(/\\/g, "/");
+  const normRel = (relPath || "").replace(/\\/g, "/");
+  if (normRel && normSrc.endsWith(normRel)) {
+    return normSrc.slice(0, normSrc.length - normRel.length).replace(/\/+$/, "");
+  }
+  return require("path").dirname(srcPath);
+}
+
+/**
+ * Recursively list all .md files under sourceRoot as normalized ('/')
+ * relative paths. Used by GC to detect deleted stubs.
+ *
+ * Skips .git directories. Returns null if sourceRoot is empty or
+ * unreadable (GC is skipped in that case).
+ *
+ * @param {string} sourceRoot
+ * @returns {Set<string>|null}
+ */
+function listStubs(sourceRoot) {
+  if (!sourceRoot) return null;
+  const fs = require("fs");
+  const path = require("path");
+  const stubs = new Set();
+  function walk(dir) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name === ".git") continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+      } else if (e.isFile() && e.name.endsWith(".md")) {
+        stubs.add(path.relative(sourceRoot, full).replace(/\\/g, "/"));
+      }
+    }
+  }
+  try {
+    walk(sourceRoot);
+  } catch {
+    return null;
+  }
+  return stubs;
+}
+
+/**
+ * Compute rule names present in oldNames but absent from enabledNames.
+ * These are "stale" — previously injected but no longer active — and
+ * should be deleted from output files.
+ *
+ * @param {string[]} oldNames      — rules recorded in the manifest
+ * @param {string[]} enabledNames  — rules that should exist now
+ * @returns {string[]}
+ */
+function diffRuleNames(oldNames, enabledNames) {
+  if (!Array.isArray(oldNames) || oldNames.length === 0) return [];
+  const enabled = new Set(enabledNames);
+  return oldNames.filter((n) => !enabled.has(n));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Enable classification
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -505,23 +629,61 @@ async function main() {
   const body = (fmMatch ? fmMatch[2] : input).trim();
 
   // -- 3. Classify rules by enable state --
-  // Disabled rules are not downloaded; within one sync we delete all
-  // disabled rules first, then upsert all enabled rules (see step 6).
+  // Disabled rules are not downloaded (zero-network). Their deletion is
+  // handled by the manifest diff below (not in enabledNames -> stale).
+  // disabledNames is kept as a fallback for pre-manifest migration.
   const classified = classifyRules(
     fm.enable,
     fm.urls,
-    deriveLocalName(fm, process.env.SS_REL_PATH || ""),
-    body
+   deriveLocalName(fm, process.env.SS_REL_PATH || ""),
+   body
   );
 
-  if (
-    classified.remoteEnabled.length === 0 &&
-    !classified.localEnabled &&
-    classified.disabledNames.length === 0
-  ) {
-    // Nothing to download, inject, or withdraw.
-    return;
+  // -- 3b. Manifest: read, GC deleted stubs, diff current stub --
+  const extDir = process.cwd();
+  const manifest = readManifest(extDir);
+  const targetKey = (process.env.SS_TARGET_DIR || "_default").replace(/\\/g, "/");
+  const stubKey = (process.env.SS_REL_PATH || "").replace(/\\/g, "/");
+  if (!manifest[targetKey]) manifest[targetKey] = {};
+  const targetEntry = manifest[targetKey];
+
+  // GC: detect stubs whose source files no longer exist.
+  const sourceRoot = findSourceRoot(
+    process.env.SS_SRC_PATH || "",
+    process.env.SS_REL_PATH || ""
+  );
+  const existingStubs = listStubs(sourceRoot);
+  if (existingStubs) {
+    for (const oldStub of Object.keys(targetEntry)) {
+      if (oldStub === stubKey) continue; // current stub handled by diff
+      if (!existingStubs.has(oldStub)) {
+       const entry = targetEntry[oldStub];
+        for (const outPath of entry.outputs || []) {
+         let content = "";
+          try {
+            content = require("fs").readFileSync(outPath, "utf8").replace(/\r\n/g, "\n");
+          } catch {
+            continue; // output file gone, nothing to clean
+          }
+          for (const name of entry.rules || []) {
+            content = deleteRule(content, name);
+          }
+          require("fs").writeFileSync(outPath, content, "utf8");
+        }
+        delete targetEntry[oldStub];
+      }
+    }
   }
+
+  // Per-stub diff: old rule names no longer in the current enabled set.
+  const oldEntry = targetEntry[stubKey];
+  const oldNames = oldEntry ? oldEntry.rules || [] : [];
+  const enabledNames = classified.remoteEnabled.map((r) => r.name);
+  if (classified.localEnabled) {
+    enabledNames.push(deriveLocalName(fm, process.env.SS_REL_PATH || ""));
+  }
+  const staleNames = diffRuleNames(oldNames, enabledNames);
+  const namesToDelete = [...new Set([...classified.disabledNames, ...staleNames])];
 
   // -- 4. Download enabled remote rules (concurrent, fault-tolerant) --
   /** @type {{name:string, content:string}[]} */
@@ -557,7 +719,7 @@ async function main() {
   const projectRoot = findProjectRoot(process.env.SS_TARGET_DIR || "");
   const outputPaths = resolveOutputs(outputs, projectRoot);
 
-  // -- 6. Per output file: delete disabled, then upsert enabled --
+  // -- 6. Per output file: delete stale + disabled, then upsert enabled --
   for (const outPath of outputPaths) {
     let existed = true;
     let existing = "";
@@ -573,7 +735,7 @@ async function main() {
       existed = false;
     }
 
-    for (const name of classified.disabledNames) {
+    for (const name of namesToDelete) {
       existing = deleteRule(existing, name);
     }
     for (const rule of rules) {
@@ -588,6 +750,10 @@ async function main() {
     require("fs").mkdirSync(require("path").dirname(outPath), { recursive: true });
     require("fs").writeFileSync(outPath, existing, "utf8");
   }
+
+  // -- 7. Update manifest with current stub's state --
+  targetEntry[stubKey] = { outputs: outputPaths, rules: enabledNames };
+  writeManifest(extDir, manifest);
 
   // stdout intentionally empty — skillshare writes a zero-byte placeholder
   // into the dummy target directory, which .gitignore suppresses.
@@ -616,4 +782,9 @@ module.exports = {
   findProjectRoot,
   resolveOutputs,
   homeDir,
+  readManifest,
+  writeManifest,
+  findSourceRoot,
+  listStubs,
+  diffRuleNames,
 };

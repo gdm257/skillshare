@@ -170,6 +170,29 @@ stub that both disables one rule and enables another leaves the output
 file with exactly one blank line between remaining blocks. Disabled rules
 never touch the network: the download is skipped and only the deletion runs.
 
+## Automatic cleanup (sync manifest)
+
+ruler maintains a `.ruler-manifest.json` in the extension directory that
+records which rules each stub injected and which output files they went
+to. On every sync this state drives two automatic cleanup mechanisms:
+
+1. **Orphan GC** — if a stub `.md` file is deleted from the source
+   directory, the next sync of any *other* stub detects the missing file,
+   removes the deleted stub's `<rule>` blocks from every output, and
+   prunes its manifest entry. No manual `enable: false` needed.
+2. **Per-stub diff** — if a URL entry is removed from a stub's
+   frontmatter (or its `name` changes), the stale `<rule>` block is
+   automatically deleted on the next sync.
+
+The manifest is a derived state file (gitignored) — you never need to
+edit it, and deleting it simply means the next sync rebuilds the
+baseline without cleanup (rules already present are preserved, not
+re-deleted).
+
+The first sync after upgrading (no manifest yet) behaves exactly like
+before: no deletions, only upserts. After that baseline is written, all
+subsequent syncs are fully manifest-driven.
+
 ## Test locally
 
 Set `SS_TARGET_DIR` to match your mode (the value skillshare passes
@@ -231,6 +254,7 @@ extensions/ruler/
 ├── convert.d.ts         # TypeScript declarations for IDE support
 ├── test-ruler.js        # Offline smoke test (exercises the real convert.js exports)
 ├── .gitignore           # Ignores dummy/ so placeholder files stay out of VC
+                          #          + .ruler-manifest.json (sync state, derived)
 └── README.md            # This file
 ```
 

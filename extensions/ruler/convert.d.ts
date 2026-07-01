@@ -73,8 +73,11 @@ interface TaskResult<T> {
 /** Maximum concurrent HTTP requests. */
 declare const FETCH_CONCURRENCY: 4;
 
+/** Manifest filename, written in the extension dir. */
+declare const MANIFEST_FILE: string;
+
 // ═══════════════════════════════════════════════════════════════
-// YAML 子集解析器
+// YAML subset parser
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -95,7 +98,7 @@ declare function parseYamlSubset(text: string): ParsedFrontmatter;
 declare function parseYamlArray(lines: string[], start: number): any[];
 
 // ═══════════════════════════════════════════════════════════════
-// HTTP 下载
+// HTTP download
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -124,7 +127,7 @@ declare function runLimited<T>(
 ): Promise<Array<TaskResult<T>>>;
 
 // ═══════════════════════════════════════════════════════════════
-// XML Rule Block 管理
+// XML Rule Block management
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -193,7 +196,57 @@ declare function classifyRules(
 ): ClassifiedRules;
 
 // ═══════════════════════════════════════════════════════════════
-// 项目根目录推算
+// Sync manifest
+// ═══════════════════════════════════════════════════════════════
+
+/** Per-stub manifest entry: what was injected on the last sync. */
+interface ManifestEntry {
+  /** Absolute output file paths the rules were injected into. */
+  outputs: string[];
+  /** Rule names that were injected. */
+  rules: string[];
+}
+
+/**
+ * Manifest shape: `{ [targetDir]: { [stubRelPath]: ManifestEntry } }`.
+ * Keys use normalized forward slashes.
+ */
+type RulerManifest = Record<string, Record<string, ManifestEntry>> & {
+  _updated_at?: string;
+};
+
+/**
+ * Read the sync manifest from a directory.
+ * Returns {} on missing file or corrupt JSON.
+ * @param extDir  Extension directory (usually process.cwd()).
+ */
+declare function readManifest(extDir: string): RulerManifest;
+
+/**
+ * Write the sync manifest to a directory with a `_updated_at` timestamp.
+ */
+declare function writeManifest(extDir: string, manifest: RulerManifest): void;
+
+/**
+ * Derive the source root from SS_SRC_PATH and SS_REL_PATH.
+ * Strips relPath from the end of srcPath; falls back to dirname.
+ */
+declare function findSourceRoot(srcPath: string, relPath: string): string;
+
+/**
+ * Recursively list .md files under sourceRoot as normalized relative
+ * paths. Returns null if sourceRoot is empty or unreadable.
+ */
+declare function listStubs(sourceRoot: string): Set<string> | null;
+
+/**
+ * Return rule names in oldNames but NOT in enabledNames (stale rules
+ * to delete).
+ */
+declare function diffRuleNames(oldNames: string[], enabledNames: string[]): string[];
+
+// ═══════════════════════════════════════════════════════════════
+// Project root detection
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -224,7 +277,7 @@ declare function findProjectRoot(targetDir: string): string;
 declare function resolveOutputs(outputs: string[], projectRoot: string): string[];
 
 // ═══════════════════════════════════════════════════════════════
-// 入口
+// Entry point
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -233,10 +286,12 @@ declare function resolveOutputs(outputs: string[], projectRoot: string): string[
  * 1. Reads stdin.
  * 2. Parses frontmatter.
  * 3. Classifies rules by `enable` (disabled rules are not downloaded).
+ * 3b. Reads manifest; GC stubs whose source files are gone; diffs current
+ *     stub's old vs enabled rule names to find stale rules to delete.
  * 4. Downloads enabled remote `urls` (concurrently), collects local body.
  * 5. Resolves output paths.
- * 6. Per output file: deletes disabled `<rule>` blocks (normalized), then
+ * 6. Per output file: deletes stale + disabled `<rule>` blocks, then
  *    upserts enabled `<rule>` blocks.
- * 7. Writes no meaningful stdout (skillshare writes empty placeholders).
+ * 7. Updates manifest with current stub state; writes no meaningful stdout.
  */
 declare function main(): Promise<void>;

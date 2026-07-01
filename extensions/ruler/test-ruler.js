@@ -450,5 +450,213 @@ assert(combinedFm.urls.length === 1, "combined has 1 url");
 assert(combinedBody === "Local body content here.", "combined body extracted");
 
 // ── Summary ──
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: diffRuleNames (pure)
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== diffRuleNames (pure) ===");
+
+assert(
+  C.diffRuleNames(["a", "b", "c"], ["a", "c"]).join(",") === "b",
+  "diff: b is stale (removed from enabled)"
+);
+assert(
+  C.diffRuleNames(["a"], ["a", "b"]).length === 0,
+  "diff: no stale when new rule added"
+);
+assert(
+  C.diffRuleNames([], ["a"]).length === 0,
+  "diff: first run (old empty) -> nothing stale"
+);
+assert(
+  C.diffRuleNames(["a", "b"], []).join(",") === "a,b",
+  "diff: all stale when nothing enabled"
+);
+assert(
+  C.diffRuleNames(undefined, ["a"]).length === 0,
+  "diff: undefined oldNames -> empty"
+);
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: findSourceRoot (pure)
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== findSourceRoot (pure) ===");
+
+const fs_real = require("fs");
+const os_real = require("os");
+const tmpDir = fs_real.mkdtempSync(path.join(os_real.tmpdir(), "ruler-test-"));
+
+// Normal case: srcPath ends with relPath (normalized /)
+const sr1 = C.findSourceRoot(
+  path.join(tmpDir, "extras", "rules", "sub", "file.md"),
+  path.join("sub", "file.md")
+);
+assert(
+  sr1 === path.join(tmpDir, "extras", "rules").replace(/\\/g, "/"),
+  "findSourceRoot: strips relPath suffix (normalized /)"
+);
+
+// Top-level stub
+const sr2 = C.findSourceRoot(
+  path.join(tmpDir, "extras", "rules", "file.md"),
+  "file.md"
+);
+assert(
+  sr2 === path.join(tmpDir, "extras", "rules").replace(/\\/g, "/"),
+  "findSourceRoot: top-level stub"
+);
+
+// Mismatch -> fallback to dirname
+assert(
+  C.findSourceRoot("/some/dir/file.md", "other.md") === path.dirname("/some/dir/file.md"),
+  "findSourceRoot: fallback to dirname on mismatch"
+);
+
+// Empty srcPath
+assert(C.findSourceRoot("", "rel.md") === "", "findSourceRoot: empty srcPath -> empty");
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: readManifest / writeManifest (I/O)
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== readManifest / writeManifest (I/O) ===");
+
+const manifestDir = path.join(tmpDir, "ext-dir");
+fs_real.mkdirSync(manifestDir, { recursive: true });
+
+// Missing manifest -> {}
+assert(Object.keys(C.readManifest(manifestDir)).length === 0, "readManifest: missing file -> {}");
+
+// Write + read round-trip
+C.writeManifest(manifestDir, {
+  "/target/dir": { "stub-a.md": { outputs: ["/abs/AGENTS.md"], rules: ["rule-a"] } },
+});
+const readBack = C.readManifest(manifestDir);
+assert(readBack["/target/dir"]["stub-a.md"].rules[0] === "rule-a", "manifest round-trip");
+assert(typeof readBack._updated_at === "string", "manifest has _updated_at");
+
+// Corrupt JSON -> {}
+fs_real.writeFileSync(path.join(manifestDir, ".ruler-manifest.json"), "{broken", "utf8");
+assert(Object.keys(C.readManifest(manifestDir)).length === 0, "readManifest: corrupt JSON -> {}");
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: listStubs (I/O)
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== listStubs (I/O) ===");
+
+const sourceDir = path.join(tmpDir, "source");
+fs_real.mkdirSync(path.join(sourceDir, "sub"), { recursive: true });
+fs_real.writeFileSync(path.join(sourceDir, "a.md"), "", "utf8");
+fs_real.writeFileSync(path.join(sourceDir, "sub", "b.md"), "", "utf8");
+fs_real.writeFileSync(path.join(sourceDir, "c.txt"), "", "utf8");
+fs_real.mkdirSync(path.join(sourceDir, ".git"), { recursive: true });
+fs_real.writeFileSync(path.join(sourceDir, ".git", "ignore.md"), "", "utf8");
+
+const stubs = C.listStubs(sourceDir);
+assert(stubs !== null, "listStubs: returns a Set");
+assert(stubs.has("a.md"), "listStubs: finds top-level .md");
+assert(stubs.has(path.join("sub", "b.md").replace(/\\/g, "/")), "listStubs: finds nested .md (normalized /)");
+assert(!stubs.has("c.txt"), "listStubs: skips non-.md");
+assert(
+  !stubs.has(".git/ignore.md") && !stubs.has(path.join(".git", "ignore.md").replace(/\\/g, "/")),
+  "listStubs: skips .git"
+);
+assert(C.listStubs("") === null, "listStubs: empty sourceRoot -> null");
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: GC simulation (deleted stub -> rules cleaned)
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== manifest GC simulation ===");
+
+// Inline readOutput helper (was exported, now inlined in convert.js)
+function readOutput(p) {
+  try { return fs_real.readFileSync(p, "utf8").replace(/\r\n/g, "\n"); } catch { return ""; }
+}
+
+// Manifest has stubs A, B, C. Source dir only has A and C (B deleted).
+const gcExtDir = path.join(tmpDir, "gc-ext");
+fs_real.mkdirSync(gcExtDir, { recursive: true });
+const gcSourceDir = path.join(tmpDir, "gc-source");
+fs_real.mkdirSync(gcSourceDir, { recursive: true });
+fs_real.writeFileSync(path.join(gcSourceDir, "a.md"), "rule A", "utf8");
+fs_real.writeFileSync(path.join(gcSourceDir, "c.md"), "rule C", "utf8");
+
+// Create output file with A, B, C rules
+const gcOutputDir = path.join(tmpDir, "gc-output");
+fs_real.mkdirSync(gcOutputDir, { recursive: true });
+const gcOutputPath = path.join(gcOutputDir, "AGENTS.md");
+fs_real.writeFileSync(
+  gcOutputPath,
+  C.makeRuleBlock("rule-a", "A content") + "\n\n" +
+  C.makeRuleBlock("rule-b", "B content") + "\n\n" +
+  C.makeRuleBlock("rule-c", "C content") + "\n",
+  "utf8"
+);
+
+// Write manifest with A, B, C
+const gcTargetKey = gcOutputDir.replace(/\\/g, "/");
+C.writeManifest(gcExtDir, {
+  [gcTargetKey]: {
+    "a.md": { outputs: [gcOutputPath], rules: ["rule-a"] },
+    "b.md": { outputs: [gcOutputPath], rules: ["rule-b"] },
+    "c.md": { outputs: [gcOutputPath], rules: ["rule-c"] },
+  },
+});
+
+// Simulate GC (processing stub "a.md"): B is gone -> delete rule-b
+const gcManifest = C.readManifest(gcExtDir);
+const gcEntry = gcManifest[gcTargetKey];
+const gcStubs = C.listStubs(gcSourceDir);
+let gcDeleted = [];
+for (const oldStub of Object.keys(gcEntry)) {
+  if (oldStub === "a.md") continue;
+  if (!gcStubs.has(oldStub)) {
+    const e = gcEntry[oldStub];
+    for (const outP of e.outputs || []) {
+      let content = readOutput(outP);
+      for (const name of e.rules || []) { content = C.deleteRule(content, name); gcDeleted.push(name); }
+      if (fs_real.existsSync(outP)) fs_real.writeFileSync(outP, content, "utf8");
+    }
+    delete gcEntry[oldStub];
+  }
+}
+assert(gcDeleted.indexOf("rule-b") !== -1, "GC: deleted rule-b (stub b.md gone)");
+assert(gcDeleted.indexOf("rule-a") === -1, "GC: did NOT delete rule-a (stub exists)");
+assert(gcDeleted.indexOf("rule-c") === -1, "GC: did NOT delete rule-c (stub exists)");
+const gcAfter = readOutput(gcOutputPath);
+assert(gcAfter.indexOf("rule-b") === -1, "GC: rule-b block gone from output");
+assert(gcAfter.indexOf("rule-a") !== -1, "GC: rule-a preserved");
+assert(gcAfter.indexOf("rule-c") !== -1, "GC: rule-c preserved");
+assert(gcAfter.indexOf("\n\n\n") === -1, "GC: blank-line invariant");
+assert(!gcEntry["b.md"], "GC: b.md removed from manifest");
+assert(gcEntry["a.md"] !== undefined && gcEntry["c.md"] !== undefined, "GC: a.md and c.md still in manifest");
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sync manifest: enable=false + diff interaction
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== enable=false + manifest diff ===");
+
+// Manifest had ["a","b"]. enable:false on b -> not downloaded, in stale.
+const eCls = C.classifyRules("false", [
+  { name: "a", url: "https://example.com/a.md", enable: "true" },
+  { name: "b", url: "https://example.com/b.md" },
+], "stub-local", "");
+const eEnabled = eCls.remoteEnabled.map(function (r) { return r.name; });
+const eStale = C.diffRuleNames(["a", "b"], eEnabled);
+const eToDelete = Array.from(new Set([].concat(eCls.disabledNames, eStale)));
+assert(eEnabled.indexOf("b") === -1, "enable=false: b not downloaded (zero-network)");
+assert(eToDelete.indexOf("b") !== -1, "enable=false: b in namesToDelete");
+assert(eCls.remoteEnabled.length === 1, "enable=false: only a enabled");
+
+// Cleanup temp dir
+try { fs_real.rmSync(tmpDir, { recursive: true, force: true }); } catch (e) {}
+
 console.log("\n=== Results: " + passed + " passed, " + failed + " failed ===");
 process.exit(failed > 0 ? 1 : 0);
+// MANIFEST_END
+// MANIFEST_END
