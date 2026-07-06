@@ -3,9 +3,10 @@
  * Offline smoke test for the ruler extension.
  *
  * Imports the REAL helpers from convert.js (no divergent copies) and
- * exercises frontmatter parsing, XML block construction, upsert/delete
- * logic, enable cascade, delete normalization, mixed delete+upsert
- * ordering, and the round-trip invariant — with NO network access.
+ * exercises frontmatter parsing, comment block construction, upsert/delete
+ * logic, enable cascade, delete normalization, old-format migration,
+ * mixed delete+upsert ordering, and the round-trip invariant — with
+ * NO network access.
  *
  * Run: node extensions/ruler/test-ruler.js
  */
@@ -98,27 +99,39 @@ assert(fmEnable.urls[1].enable === "true", "url b has per-entry enable true");
 console.log("\n=== makeRuleBlock ===");
 
 const block = C.makeRuleBlock("test-rule", "Do something\nGreat!");
-assert(block.indexOf('<rule name="test-rule">') === 0, "starts with opening tag");
-assert(block.indexOf("</rule>") === block.length - 7, "ends with closing tag");
+assert(block.indexOf("<!-- rule-test-rule:start -->") === 0, "starts with start marker");
+assert(block.indexOf("<!-- rule-test-rule:end -->") === block.length - ("<!-- rule-test-rule:end -->").length, "ends with end marker");
 assert(block.indexOf("Do something") !== -1, "includes content");
 assert(block.indexOf("Great!") !== -1, "includes all content");
 
-// Name-attribute XML escaping (real makeRuleBlock escapes &, ", <, >)
-const blockEsc = C.makeRuleBlock('a&b"c', "body");
-assert(blockEsc.indexOf('&amp;') !== -1, "& escaped in attr");
-assert(blockEsc.indexOf('&quot;') !== -1, '" escaped in attr');
+// Name is embedded directly in comment markers (no XML escaping needed)
+const blockRaw = C.makeRuleBlock('a&b"c', "body");
+assert(blockRaw.indexOf("<!-- rule-a&b\"c:start -->") !== -1, "name embedded raw in start marker");
+assert(blockRaw.indexOf("<!-- rule-a&b\"c:end -->") !== -1, "name embedded raw in end marker");
 
-// </rule> content conflict -> warning (still emitted)
+// end-marker string in content -> warning (still emitted)
 _origStderr = process.stderr.write.bind(process.stderr);
 let warned = false;
 process.stderr.write = (s) => {
-  if (String(s).indexOf("</rule>") !== -1) warned = true;
+  if (String(s).indexOf("end marker") !== -1) warned = true;
   return true;
 };
-const blockConflict = C.makeRuleBlock("r", "x\n</rule>\ny");
+const blockConflict = C.makeRuleBlock("r", "x\n<!-- rule-r:end -->\ny");
 process.stderr.write = _origStderr;
-assert(warned, "warns when content contains </rule>");
-assert(blockConflict.indexOf("</rule>") !== -1, "block still written despite conflict");
+assert(warned, "warns when content contains end marker");
+assert(blockConflict.indexOf("<!-- rule-r:end -->") !== -1, "block still written despite conflict");
+
+// Name containing "--" -> warning (HTML comment hazard)
+_origStderr = process.stderr.write.bind(process.stderr);
+let nameWarned = false;
+process.stderr.write = (s) => {
+  if (String(s).indexOf("a--b") !== -1) nameWarned = true;
+  return true;
+};
+const blockDash = C.makeRuleBlock("a--b", "body");
+process.stderr.write = _origStderr;
+assert(nameWarned, "warns when name contains --");
+assert(blockDash.indexOf("<!-- rule-a--b:start -->") !== -1, "block still written despite name warning");
 
 // ════════════════════════════════════════════════════════════════════════════
 // upsertRule
@@ -132,13 +145,13 @@ const existing1 = [
   "",
   "Manual content.",
   "",
-  '<rule name="code-review">',
+  "<!-- rule-code-review:start -->",
   "Old content",
-  "</rule>",
+  "<!-- rule-code-review:end -->",
   "",
   "More text.",
 ].join("\n");
-const newBlock1 = '<rule name="code-review">\nNew content\n</rule>';
+const newBlock1 = "<!-- rule-code-review:start -->\nNew content\n<!-- rule-code-review:end -->";
 const result1 = C.upsertRule(existing1, "code-review", newBlock1);
 assert(result1.indexOf("New content") !== -1, "replaced content is present");
 assert(result1.indexOf("Old content") === -1, "old content is gone");
@@ -147,15 +160,15 @@ assert(result1.indexOf("More text.") !== -1, "non-rule content after rule preser
 
 // append to non-empty
 const existing2 = "# AGENTS\n\nManual content.";
-const newBlock2 = '<rule name="new-rule">\nNew stuff\n</rule>';
+const newBlock2 = "<!-- rule-new-rule:start -->\nNew stuff\n<!-- rule-new-rule:end -->";
 const result2 = C.upsertRule(existing2, "new-rule", newBlock2);
 assert(result2.indexOf("New stuff") !== -1, "new rule content present");
 assert(result2.indexOf("Manual content.") !== -1, "existing content preserved");
-assert(result2.indexOf("</rule>") === result2.length - 8, "new rule at end");
+assert(result2.endsWith("<!-- rule-new-rule:end -->\n"), "new rule at end");
 
 // fresh file: NO leading blank line, single trailing newline (fixed)
-const fresh = C.upsertRule("", "my-rule", '<rule name="my-rule">\ncontent\n</rule>');
-assert(fresh === '<rule name="my-rule">\ncontent\n</rule>\n', "fresh file: block + single newline, no leading blank");
+const fresh = C.upsertRule("", "my-rule", "<!-- rule-my-rule:start -->\ncontent\n<!-- rule-my-rule:end -->");
+assert(fresh === "<!-- rule-my-rule:start -->\ncontent\n<!-- rule-my-rule:end -->\n", "fresh file: block + single newline, no leading blank");
 
 // ════════════════════════════════════════════════════════════════════════════
 // Enable cascade (isEnabled) — 8 cases
@@ -322,7 +335,7 @@ assert(rtm.indexOf("\n\n\n") === -1, "round-trip multi: invariant holds");
 console.log("\n=== CRLF normalization (LF invariant on read) ===");
 
 // CRLF existing file, normalized then upserted -> no mixed endings
-const crlfSeed = "# AGENTS\r\n\r\n<rule name=\"old\">\r\nold body\r\n</rule>\r\n";
+const crlfSeed = "# AGENTS\r\n\r\n<!-- rule-old:start -->\r\nold body\r\n<!-- rule-old:end -->\r\n";
 const lfSeed = crlfSeed.replace(/\r\n/g, "\n");
 const upsertOnNormalized = C.upsertRule(lfSeed, "fresh", C.makeRuleBlock("fresh", "new rule"));
 assert(upsertOnNormalized.indexOf("\r") === -1, "CRLF->LF upsert: no CR in result");
@@ -332,29 +345,29 @@ assert(upsertOnNormalized.indexOf("old body") !== -1, "CRLF->LF upsert: old bloc
 
 // CRLF three-block file, delete middle after normalization -> regex works
 const crlfThree =
-  "<rule name=\"a\">\nA\n</rule>\n\n" +
-  "<rule name=\"b\">\nB\n</rule>\n\n" +
-  "<rule name=\"c\">\nC\n</rule>\n";
+  "<!-- rule-a:start -->\nA\n<!-- rule-a:end -->\n\n" +
+  "<!-- rule-b:start -->\nB\n<!-- rule-b:end -->\n\n" +
+  "<!-- rule-c:start -->\nC\n<!-- rule-c:end -->\n";
 const delMid = C.deleteRule(crlfThree, "b");
 assert(delMid.indexOf("\r") === -1, "CRLF->LF delete middle: no CR");
 assert(
-  delMid === "<rule name=\"a\">\nA\n</rule>\n\n<rule name=\"c\">\nC\n</rule>\n",
+  delMid === "<!-- rule-a:start -->\nA\n<!-- rule-a:end -->\n\n<!-- rule-c:start -->\nC\n<!-- rule-c:end -->\n",
   "CRLF->LF delete middle: survivors separated by exactly 1 blank line"
 );
 
 // CRLF header + rule, delete rule after normalization -> header kept, LF only
-const crlfHeaderRule = "# Header\r\n\r\n<rule name=\"x\">\r\nX\r\n</rule>\r\n".replace(/\r\n/g, "\n");
+const crlfHeaderRule = "# Header\r\n\r\n<!-- rule-x:start -->\r\nX\r\n<!-- rule-x:end -->\r\n".replace(/\r\n/g, "\n");
 const headerAfterDel = C.deleteRule(crlfHeaderRule, "x");
 assert(headerAfterDel === "# Header\n", "CRLF->LF delete with header: header kept, rule gone");
 assert(headerAfterDel.indexOf("\r") === -1, "CRLF->LF delete with header: no CR remains");
 
 // Full round-trip: CRLF seed -> normalize -> upsert -> stays LF on re-read
-const rtCrlf = "<rule name=\"rt\">\r\nv1\r\n</rule>\r\n".replace(/\r\n/g, "\n");
+const rtCrlf = "<!-- rule-rt:start -->\r\nv1\r\n<!-- rule-rt:end -->\r\n".replace(/\r\n/g, "\n");
 let rtLf = C.upsertRule("", "rt", C.makeRuleBlock("rt", "v1"));
 rtLf = C.deleteRule(rtLf, "rt");
 assert(rtLf === "", "CRLF->LF round-trip: disable empties file");
 rtLf = C.upsertRule(rtLf, "rt", C.makeRuleBlock("rt", "v2"));
-assert(rtLf === "<rule name=\"rt\">\nv2\n</rule>\n", "CRLF->LF round-trip: restore is clean LF");
+assert(rtLf === "<!-- rule-rt:start -->\nv2\n<!-- rule-rt:end -->\n", "CRLF->LF round-trip: restore is clean LF");
 assert(rtLf.indexOf("\r") === -1, "CRLF->LF round-trip: final output is pure LF");
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -565,6 +578,68 @@ assert(
   "listStubs: skips .git"
 );
 assert(C.listStubs("") === null, "listStubs: empty sourceRoot -> null");
+
+// ════════════════════════════════════════════════════════════════════════════
+// Migration: old <rule name="X">…</rule> → comment markers
+// ════════════════════════════════════════════════════════════════════════════
+
+console.log("\n=== migrateXmlToComments ===");
+
+// Basic: old XML block → comment markers
+const mig1 = C.migrateXmlToComments('<rule name="security-check">\nold content\n</rule>');
+assert(
+  mig1 === "<!-- rule-security-check:start -->\nold content\n<!-- rule-security-check:end -->",
+  "migration: single XML block converted to comment markers"
+);
+
+// Body preserved exactly (no trimming)
+const mig2 = C.migrateXmlToComments('<rule name="x">\nline1\nline2\n</rule>');
+assert(
+  mig2 === "<!-- rule-x:start -->\nline1\nline2\n<!-- rule-x:end -->",
+  "migration: multi-line body preserved"
+);
+
+// Mixed: old XML + existing comment blocks coexist
+const mig3 = C.migrateXmlToComments(
+  '<rule name="old">\nold body\n</rule>\n\n<!-- rule-new:start -->\nnew body\n<!-- rule-new:end -->'
+);
+assert(
+  mig3.indexOf("<!-- rule-old:start -->") !== -1 &&
+    mig3.indexOf("<!-- rule-old:end -->") !== -1,
+  "migration: old XML block converted in mixed file"
+);
+assert(
+  mig3.indexOf("<rule ") === -1,
+  "migration: no XML tags remain after migration"
+);
+assert(
+  mig3.indexOf("<!-- rule-new:start -->") !== -1 &&
+    mig3.indexOf("<!-- rule-new:end -->") !== -1,
+  "migration: existing comment blocks unaffected"
+);
+
+// Idempotent: pure comment input → unchanged
+const pureComments = "<!-- rule-a:start -->\nA\n<!-- rule-a:end -->";
+assert(C.migrateXmlToComments(pureComments) === pureComments, "migration: idempotent on comment-only input");
+
+// Empty input
+assert(C.migrateXmlToComments("") === "", "migration: empty string unchanged");
+
+// XML entity unescaping in name attribute
+const migEntity = C.migrateXmlToComments('<rule name="a&amp;b">body</rule>');
+assert(
+  migEntity.indexOf("<!-- rule-a&b:start -->") !== -1,
+  "migration: &amp; unescaped in name"
+);
+
+// Migration enables upsert on old-format files
+const migThenUpsert = C.upsertRule(
+  C.migrateXmlToComments('<rule name="x">old</rule>'),
+  "x",
+  C.makeRuleBlock("x", "new content")
+);
+assert(migThenUpsert.indexOf("new content") !== -1, "migrate + upsert: old block replaced");
+assert(migThenUpsert.indexOf("old") === -1, "migrate + upsert: old content gone");
 
 // ════════════════════════════════════════════════════════════════════════════
 // Sync manifest: GC simulation (deleted stub -> rules cleaned)

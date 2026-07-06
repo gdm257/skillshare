@@ -2,7 +2,7 @@
 
 Remote + local rules extension for skillshare. Reads stub `.md` files and
 injects rules into `AGENTS.md` / `CLAUDE.md` (or custom outputs) via
-`<rule name="...">` XML blocks.
+`<!-- rule-{name}:start/end -->` HTML comment markers.
 
 ## Quick start
 
@@ -108,8 +108,8 @@ skillshare sync extras
 |-------|------|---------|-------------|
 | `urls` | array of `{name, url, enable?}` | — | Remote rules to download |
 | `outputs` | string array | `["AGENTS.md", "CLAUDE.md"]` | Output file paths |
-| `name` | string | filename stem | Overrides the `<rule name>` for local body content |
-| `enable` (top-level) | `true` / `false` | `true` | Toggles all rules in this stub; `false` skips download and deletes matching `<rule>` blocks |
+| `name` | string | filename stem | Overrides the rule name for local body content |
+| `enable` (top-level) | `true` / `false` | `true` | Toggles all rules in this stub; `false` skips download and deletes matching comment blocks |
 | `enable` (per-url) | `true` / `false` | inherits top-level | Overrides top-level `enable` for one URL |
 | `description` | string | — | Ignored by ruler (accepted for compatibility) |
 
@@ -121,15 +121,22 @@ skillshare sync extras
 
 ## How rules are merged
 
-Each stub produces one or more `<rule>` XML blocks that are merged into
+Each stub produces one or more comment marker blocks that are merged into
 every output file:
 
-- **Remote URL** → `<rule name="url.name">downloaded content</rule>`
-- **Local body** → `<rule name="filename-stem">markdown body</rule>`
+- **Remote URL** → `<!-- rule-{name}:start -->` … `<!-- rule-{name}:end -->`
+- **Local body** → `<!-- rule-{name}:start -->` … `<!-- rule-{name}:end -->`
 
-When a `<rule name="X">` already exists in the output file, it is
+When a matching `<!-- rule-{name}:start/end -->` pair already exists in the output file, it is
 replaced in-place. Otherwise it is appended at the end. Non-rule
-content (hand-written headers, comments, other XML) is never touched.
+content (hand-written headers, other comments) is never touched.
+
+### Migrating from the old XML format
+
+Older versions of ruler used `<rule name="X">…</rule>` XML tags. On the
+first sync after upgrading, ruler automatically converts all old-format
+blocks in existing output files to the new HTML comment markers — no
+manual intervention needed. The migration is one-way and idempotent.
 
 ### Processing order
 
@@ -144,7 +151,7 @@ If remote and local rules share the same `name`, the local rule wins
 
 Set `enable: false` to temporarily withdraw a rule without deleting its
 config. Disabled rules are **not** downloaded; ruler removes any
-existing `<rule name="…">` block with the same name from each output
+existing `<!-- rule-{name}:start/end -->` block with the same name from each output
 file and normalizes the surrounding blank lines so exactly one blank
 line stays between blocks. Flip it back to `true` (or omit it) to
 restore the rule on the next sync.
@@ -177,11 +184,11 @@ records which rules each stub injected and which output files they went
 to. On every sync this state drives two automatic cleanup mechanisms:
 
 1. **Orphan GC** — if a stub `.md` file is deleted from the source
-   directory, the next sync of any *other* stub detects the missing file,
-   removes the deleted stub's `<rule>` blocks from every output, and
+  directory, the next sync of any *other* stub detects the missing file,
+   removes the deleted stub's comment blocks from every output, and
    prunes its manifest entry. No manual `enable: false` needed.
 2. **Per-stub diff** — if a URL entry is removed from a stub's
-   frontmatter (or its `name` changes), the stale `<rule>` block is
+   frontmatter (or its `name` changes), the stale comment block is
    automatically deleted on the next sync.
 
 The manifest is a derived state file (gitignored) — you never need to
@@ -240,10 +247,10 @@ printf '%s\n' \
 node extensions/ruler/test-ruler.js
 ```
 
-Covers YAML parsing, XML block construction, upsert + delete logic, the
-`enable` cascade, delete blank-line normalization, the disable to re-enable
-round-trip invariant, project-root detection, and local/combined rule
-extraction. No network access needed.
+Covers YAML parsing, comment block construction, upsert + delete logic,
+the `enable` cascade, delete blank-line normalization, the disable to
+re-enable round-trip invariant, old-format migration, project-root
+detection, and local/combined rule extraction. No network access needed.
 
 ## Files
 

@@ -15,7 +15,7 @@
 
 /** One entry in the frontmatter `urls` array. */
 interface RuleUrl {
-  /** Rule identifier (used as `<rule name="...">` attribute). */
+  /** Rule identifier (embedded in comment markers). */
   name?: string;
   /** Remote Markdown source URL. */
   url?: string;
@@ -36,9 +36,9 @@ interface ParsedFrontmatter {
 
 /** A built rule ready to be merged into output files. */
 interface RuleEntry {
-  /** Value for the `<rule name="...">` attribute. */
+  /** Rule name embedded in comment markers. */
   name: string;
-  /** Raw Markdown body inside the `<rule>` block. */
+  /** Raw Markdown body inside the comment marker block. */
   content: string;
 }
 
@@ -127,7 +127,7 @@ declare function runLimited<T>(
 ): Promise<Array<TaskResult<T>>>;
 
 // ═══════════════════════════════════════════════════════════════
-// XML Rule Block management
+// Rule Block management (HTML comment markers)
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -136,10 +136,17 @@ declare function runLimited<T>(
 declare function escapeXmlAttr(s: string): string;
 
 /**
- * Build a `<rule name="…">…</rule>` XML block.
+ * Unescape XML entities in an attribute value (reverse of escapeXmlAttr).
+ * Used during migration from the old `<rule name="...">` format.
+ */
+declare function unescapeXmlAttr(s: string): string;
+
+/**
+ * Build a `<!-- rule-{name}:start/end -->` comment marker block.
  *
- * If `content` contains the literal string `</rule>`, a warning is
- * emitted to stderr but the block is still returned as-is.
+ * If `name` contains `--` or `>` (HTML comment hazards), or if `content`
+ * contains the block's end marker string, a warning is emitted to stderr
+ * but the block is still returned as-is.
  */
 declare function makeRuleBlock(name: string, content: string): string;
 
@@ -147,7 +154,7 @@ declare function makeRuleBlock(name: string, content: string): string;
 declare function escapeRegex(s: string): string;
 
 /**
- * Upsert a `<rule name="X">` block into existing file content.
+ * Upsert a `<!-- rule-{name}:start/end -->` block into existing file content.
  *
  * - If a matching block exists → the entire block is replaced.
  * - Otherwise → the block is appended at the end (exactly one blank line
@@ -158,12 +165,19 @@ declare function escapeRegex(s: string): string;
 declare function upsertRule(existing: string, ruleName: string, newBlock: string): string;
 
 /**
- * Remove a `<rule name="X">…</rule>` block by name and normalize blank
- * lines so exactly one blank line stays between remaining blocks, the
+ * Remove a `<!-- rule-{name}:start/end -->` block by name and normalize
+ * blank lines so exactly one blank line stays between remaining blocks, the
  * first block has no leading blank line, and the file ends with a single
  * newline. Returns `""` when nothing remains.
  */
 declare function deleteRule(existing: string, ruleName: string): string;
+
+/**
+ * Migrate old `<rule name="X">…</rule>` XML blocks to comment markers
+ * `<!-- rule-X:start -->…<!-- rule-X:end -->`. Name attribute values are
+ * XML-entity-unescaped; body is preserved exactly; idempotent.
+ */
+declare function migrateXmlToComments(content: string): string;
 
 // ═══════════════════════════════════════════════════════════════
 // Enable classification
@@ -177,7 +191,7 @@ declare function deleteRule(existing: string, ruleName: string): string;
 declare function isEnabled(topEnable: string | undefined, entryEnable: string | undefined): boolean;
 
 /**
- * Derive the `<rule name>` for the stub's local body: frontmatter `name`
+ * Derive the rule name for the stub's local body: frontmatter `name`
  * → filename stem of `SS_REL_PATH` → `"local-rule"`.
  */
 declare function deriveLocalName(fm: ParsedFrontmatter, relPath: string): string;
@@ -290,8 +304,9 @@ declare function resolveOutputs(outputs: string[], projectRoot: string): string[
  *     stub's old vs enabled rule names to find stale rules to delete.
  * 4. Downloads enabled remote `urls` (concurrently), collects local body.
  * 5. Resolves output paths.
- * 6. Per output file: deletes stale + disabled `<rule>` blocks, then
- *    upserts enabled `<rule>` blocks.
+ * 6. Per output file: deletes stale + disabled comment blocks, then
+ *    upserts enabled comment blocks. (Old `<rule>` XML blocks are migrated
+ *    to comment markers on read before delete/upsert.)
  * 7. Updates manifest with current stub state; writes no meaningful stdout.
  */
 declare function main(): Promise<void>;

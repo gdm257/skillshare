@@ -2,18 +2,18 @@
 /**
  * ruler — Remote + local rules extension for skillshare.
  *
- * Reads stub .md files and injects rules into AGENTS.md / CLAUDE.md (or
- * custom outputs) via <rule name="..."> XML blocks.
- *
- * Two sources of rules, both optional and composable:
- *
- *   1. Remote URLs  — frontmatter `urls` array: each URL is downloaded
- *                     and wrapped in a <rule> block using the entry's `name`.
- *   2. Local body   — the stub's own Markdown body (after frontmatter) is
- *                     wrapped in a <rule> block named after the filename stem
- *                     (or frontmatter `name` if present).
- *
- * Frontmatter format (YAML subset):
+* Reads stub .md files and injects rules into AGENTS.md / CLAUDE.md (or
+ * custom outputs) via <!-- rule-{name}:start/end --> HTML comment markers.
+*
+* Two sources of rules, both optional and composable:
+*
+*   1. Remote URLs  — frontmatter `urls` array: each URL is downloaded
+ *                     and wrapped in a comment marker block using the entry's `name`.
+*   2. Local body   — the stub's own Markdown body (after frontmatter) is
+ *                     wrapped in a comment marker block named after the filename stem
+*                     (or frontmatter `name` if present).
+*
+* Frontmatter format (YAML subset):
  *   enable: true              # optional top-level toggle (default: true)
  *   urls:
  *     - name: my-rule
@@ -23,13 +23,13 @@
  *     - AGENTS.md
  *     - CLAUDE.md
  *
- * `enable: false` withdraws a rule: it is NOT downloaded, and any existing
- * <rule name="..."> block with the same name is removed from each output
- * file (blank lines re-normalized). Per-url `enable` overrides the stub's
- * top-level `enable`; the local body has no per-entry knob and follows the
- * top-level `enable` only.
- *
- * If outputs is omitted it defaults to ["AGENTS.md", "CLAUDE.md"].
+* `enable: false` withdraws a rule: it is NOT downloaded, and any existing
+ * <!-- rule-{name}:start/end --> block with the same name is removed from each output
+* file (blank lines re-normalized). Per-url `enable` overrides the stub's
+* top-level `enable`; the local body has no per-entry knob and follows the
+* top-level `enable` only.
+*
+* If outputs is omitted it defaults to ["AGENTS.md", "CLAUDE.md"].
  * Paths can be relative (resolved against the project root), absolute, or
  * start with ~ (expanded to $HOME).
  *
@@ -37,10 +37,10 @@
  * empty placeholder files under the dummy output directory, which a
  * companion .gitignore suppresses.
  *
- * Pure helpers are exported (parseYamlSubset, makeRuleBlock, upsertRule,
- * deleteRule, isEnabled, classifyRules, ...) so test-ruler.js exercises the
- * real implementation instead of a divergent copy.
- */
+* Pure helpers are exported (parseYamlSubset, makeRuleBlock, upsertRule,
+ * deleteRule, migrateXmlToComments, isEnabled, classifyRules, ...) so
+ * test-ruler.js exercises the real implementation instead of a divergent copy.
+*/
 
 "use strict";
 
@@ -234,7 +234,7 @@ function runLimited(tasks, concurrency) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// XML rule block management
+// Rule block management (HTML comment markers)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -247,24 +247,44 @@ function escapeXmlAttr(s) {
 }
 
 /**
- * Build a <rule name="..."> block from its name and body content.
+ * Unescape XML entities in an attribute value (reverse of escapeXmlAttr).
+ * Used during migration from the old <rule name="..."> format.
+ * @param {string} s
+ * @returns {string}
+ */
+function unescapeXmlAttr(s) {
+  return String(s)
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+/**
+ * Build a <!-- rule-{name}:start/end --> block from its name and body content.
  *
- * WARNING: The content must not contain the literal string `</rule>` — it
- * would break the identity-based replacement regex. The extension logs a
- * warning to stderr if detected.
+ * If `name` contains `--` or `>` (which can break HTML comment parsing), or
+ * if `content` contains the block's end marker string, a warning is emitted
+ * to stderr but the block is still returned as-is.
  *
  * @param {string} name
  * @param {string} content
  * @returns {string}
  */
 function makeRuleBlock(name, content) {
-  if (content.includes("</rule>")) {
+  if (name.includes("--") || name.includes(">")) {
     process.stderr.write(
-      `ruler: warning — rule "${name}" contains "</rule>" in its content; ` +
-        "the XML block boundary may be unreliable\n"
+      `ruler: warning — rule name "${name}" contains "--" or ">" which may break HTML comment markers\n`
     );
   }
-  return `<rule name="${escapeXmlAttr(name)}">\n${content.trim()}\n</rule>`;
+  const endMarker = `<!-- rule-${name}:end -->`;
+  if (content.includes(endMarker)) {
+    process.stderr.write(
+      `ruler: warning — rule "${name}" content contains its end marker; ` +
+        "the comment boundary may be unreliable\n"
+    );
+  }
+  return `<!-- rule-${name}:start -->\n${content.trim()}\n<!-- rule-${name}:end -->`;
 }
 
 /**
@@ -277,23 +297,23 @@ function escapeRegex(s) {
 }
 
 /**
- * Upsert a <rule name="X"> block into existing file content.
+ * Upsert a <!-- rule-{name}:start/end --> block into existing file content.
  *
- * - If a <rule name="X"> block already exists -> replace its entire content
+ * - If a matching comment block already exists -> replace its entire content
  * - If no matching block exists -> append at the end of the file
  *
- * Non-rule content (plain Markdown, other XML blocks, etc.) is preserved.
+ * Non-rule content (plain Markdown, other comments, etc.) is preserved.
  * A fresh (empty) file gets no leading blank line; appended blocks are
  * separated from preceding content by exactly one blank line.
  *
  * @param {string} existing  — current file content
- * @param {string} ruleName — value of the name attribute
- * @param {string} newBlock — full <rule>...</rule> string
+ * @param {string} ruleName — rule name embedded in comment markers
+ * @param {string} newBlock — full comment marker block string
  * @returns {string}
  */
 function upsertRule(existing, ruleName, newBlock) {
-  const nameAttr = escapeRegex(ruleName);
-  const re = new RegExp(`<rule\\s+name="${nameAttr}">[\\s\\S]*?<\\/rule>`, "g");
+  const esc = escapeRegex(ruleName);
+  const re = new RegExp(`<!-- rule-${esc}:start -->[\\s\\S]*?<!-- rule-${esc}:end -->`, "g");
 
   if (re.test(existing)) {
     return existing.replace(re, newBlock);
@@ -307,13 +327,13 @@ function upsertRule(existing, ruleName, newBlock) {
 }
 
 /**
- * Remove a <rule name="X"> block by name and normalize blank lines.
+ * Remove a <!-- rule-{name}:start/end --> block by name and normalize blank lines.
  *
  * After removal: 3+ consecutive newlines collapse to exactly one blank line
  * (\n\n), leading blank lines are stripped, the file ends with a single
  * newline, and an all-empty result returns "".
  *
- * The invariant kept across operations is: any two adjacent <rule> blocks
+ * The invariant kept across operations is: any two adjacent comment blocks
  * are separated by exactly one blank line, the first block has no leading
  * blank line, and the file ends with a single newline.
  *
@@ -322,8 +342,8 @@ function upsertRule(existing, ruleName, newBlock) {
  * @returns {string}
  */
 function deleteRule(existing, ruleName) {
-  const nameAttr = escapeRegex(ruleName);
-  const re = new RegExp(`<rule\\s+name="${nameAttr}">[\\s\\S]*?<\\/rule>`, "g");
+  const esc = escapeRegex(ruleName);
+  const re = new RegExp(`<!-- rule-${esc}:start -->[\\s\\S]*?<!-- rule-${esc}:end -->`, "g");
   let out = existing.replace(re, "");
   // Collapse runs of 3+ newlines (from the gap left by the removed block)
   // down to a single blank line.
@@ -333,6 +353,27 @@ function deleteRule(existing, ruleName) {
   // Single trailing newline; empty -> "".
   out = out.replace(/\n+$/, "");
   return out === "" ? "" : out + "\n";
+}
+
+/**
+ * Migrate old <rule name="X">…</rule> XML blocks to comment markers.
+ *
+ * - name attribute values are XML-entity-unescaped (&amp; -> & etc.)
+ * - body content is preserved exactly (including surrounding newlines)
+ * - idempotent: input already in comment format is unchanged (regex only
+ *   matches `<rule` open tags)
+ *
+ * @param {string} content
+ * @returns {string}
+ */
+function migrateXmlToComments(content) {
+  return content.replace(
+    /<rule\s+name="([^"]*)">([\s\S]*?)<\/rule>/g,
+    (_match, rawName, body) => {
+      const name = unescapeXmlAttr(rawName);
+      return `<!-- rule-${name}:start -->${body}<!-- rule-${name}:end -->`;
+    }
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -481,9 +522,9 @@ function isEnabled(topEnable, entryEnable) {
 }
 
 /**
- * Derive the <rule name> for the stub's local body content.
- *
- * Priority: frontmatter `name` -> filename stem of SS_REL_PATH ->
+ * Derive the rule name for the stub's local body content.
+*
+* Priority: frontmatter `name` -> filename stem of SS_REL_PATH ->
  * "local-rule".
  *
  * @param {Record<string, any>} fm
@@ -614,7 +655,7 @@ async function main() {
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (c) => (data += c));
     // Normalize CRLF -> LF on read. The whole extension assumes LF: the
-    // <rule> block format, the upsert/delete invariants, and deleteRule's
+    // comment marker block format, the upsert/delete invariants, and deleteRule's
     // blank-line regex are all expressed in \n. Windows-authored stubs
     // arrive as CRLF; normalizing here keeps frontmatter parsing, the local
     // body, and the downstream output consistent. Existing output files
@@ -662,10 +703,11 @@ async function main() {
          let content = "";
           try {
             content = require("fs").readFileSync(outPath, "utf8").replace(/\r\n/g, "\n");
-          } catch {
-            continue; // output file gone, nothing to clean
-          }
-          for (const name of entry.rules || []) {
+         } catch {
+           continue; // output file gone, nothing to clean
+         }
+          content = migrateXmlToComments(content);
+         for (const name of entry.rules || []) {
             content = deleteRule(content, name);
           }
           require("fs").writeFileSync(outPath, content, "utf8");
@@ -730,12 +772,16 @@ async function main() {
       // CRLF would both leak mixed endings into the output and silently
       // break blank-line normalization on delete.
       existing = require("fs").readFileSync(outPath, "utf8").replace(/\r\n/g, "\n");
-    } catch {
-      // File does not exist yet — start fresh.
-      existed = false;
-    }
+   } catch {
+     // File does not exist yet — start fresh.
+     existed = false;
+   }
 
-    for (const name of namesToDelete) {
+    // Migrate old <rule name="X">…</rule> blocks to comment markers before
+    // any delete/upsert so stale deletions work on the migrated content.
+    existing = migrateXmlToComments(existing);
+
+   for (const name of namesToDelete) {
       existing = deleteRule(existing, name);
     }
     for (const rule of rules) {
@@ -775,8 +821,9 @@ module.exports = {
   escapeRegex,
   makeRuleBlock,
   upsertRule,
-  deleteRule,
-  isEnabled,
+ deleteRule,
+ migrateXmlToComments,
+ isEnabled,
   deriveLocalName,
   classifyRules,
   findProjectRoot,
