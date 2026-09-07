@@ -1,0 +1,2 @@
+run: ["node", "convert.js"]
+description: "Markdown subagent (Claude style) → oh-my-pi agent Markdown"

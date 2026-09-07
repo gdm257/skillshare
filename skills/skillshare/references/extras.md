@@ -202,6 +202,7 @@ Ready-to-copy reference implementations at `https://github.com/runkids/skillshar
 |-----------|----------|--------|
 | `codex-agents` | Claude agent MD (frontmatter + body) | Codex TOML (`name`, `description`, `developer_instructions`) |
 | `gemini-commands` | Markdown command docs | Gemini CLI TOML commands |
+| `omp-agents` | Claude agent MD (frontmatter + body) | oh-my-pi agent Markdown (fills a missing `name` from the file stem) |
 
 The `codex-agents` extension requires `name` and `description` frontmatter — files missing either field are skipped with an error. Non-agent files (e.g. prompts, changelogs) should be excluded from the extras source or given a `.agentignore`-style prefix.
 

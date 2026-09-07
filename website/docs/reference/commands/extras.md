@@ -347,6 +347,23 @@ extras:
 
 `skillshare sync extras` converts each `<agent>.md` into `~/.codex/agents/<agent>.toml`, mapping frontmatter `name`, `description`, and `model` and folding the markdown body into `developer_instructions` (other frontmatter keys are dropped). The [Codex custom agent schema](https://developers.openai.com/codex/subagents#custom-agent-file-schema) requires `name`, `description`, and `developer_instructions`, so the reference transform reports a clear error when the resolved name, description, or Markdown body is blank. No separate copy of the agents is needed.
 
+### Recipe: oh-my-pi agents
+
+oh-my-pi discovers agents as markdown from `~/.omp/agent/agents` (user) and `.omp/agents` (project), and skips cross-harness roots like `.claude/agents`. `omp-agents` is a tolerant pass-through, so one agents source feeds both levels:
+
+```yaml
+extras:
+  - name: omp-agents
+    source: ~/.config/skillshare/agents   # reuse the agents source
+    targets:
+      - path: ~/.omp/agent/agents         # user level
+        extension: omp-agents
+      - path: .omp/agents                 # project level, overrides user on name collision
+        extension: omp-agents
+```
+
+`skillshare sync extras` writes each `<agent>.md` through unchanged except for filling a missing `name` from the file stem; frontmatter and body pass through verbatim with LF endings. OMP requires `name` and `description` — files still missing `description` after the transform are skipped by OMP with a warning, and unresolvable `model` selectors fall back to the parent session's model.
+
 ---
 
 ## Directory Structure
